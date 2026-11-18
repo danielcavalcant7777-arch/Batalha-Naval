@@ -1,7 +1,5 @@
 /**
- * Regras de uma partida entre dois jogadores no mesmo computador.
- * Cada jogador posiciona a frota; depois eles se alternam atirando
- * no tabuleiro do outro (um tiro por vez). Vence quem afundar tudo primeiro.
+ * Regras de uma partida entre dois jogadores (mesmo computador ou via rede).
  */
 public class Jogo {
 
@@ -21,6 +19,7 @@ public class Jogo {
     }
 
     public String nome(int jogador)           { return nomes[jogador]; }
+    public void setNome(int jogador, String n){ nomes[jogador] = n; }
     public Tabuleiro tabuleiro(int jogador)   { return tabuleiros[jogador]; }
     public Fase fase()                        { return fase; }
     public int vez()                          { return vez; }
@@ -31,13 +30,19 @@ public class Jogo {
     /** Tabuleiro em que o jogador da vez atira. */
     public Tabuleiro alvoDaVez() { return tabuleiros[1 - vez]; }
 
-    /** Comeca a batalha se os dois jogadores ja posicionaram tudo. */
+    /** Comeca a batalha local (mesmo PC) se os dois posicionaram tudo. */
     public boolean iniciarBatalha() {
         if (fase != Fase.POSICIONANDO) return false;
         if (!tabuleiros[0].todosColocados() || !tabuleiros[1].todosColocados()) return false;
         fase = Fase.BATALHA;
         vez = 0;
         return true;
+    }
+
+    /** Comeca a batalha em rede (cada PC conhece apenas a propria frota). */
+    public void iniciarBatalhaRede() {
+        fase = Fase.BATALHA;
+        vez = 0;
     }
 
     public Tabuleiro.ResultadoTiro atirar(int l, int c) {
@@ -53,6 +58,19 @@ public class Jogo {
             vencedor = vez;
         }
         return r;
+    }
+
+    /** Registra estatisticas e resultado de um tiro sincronizado pela rede. */
+    public void registrarTiroRede(int atirador, int l, int c, Tabuleiro.ResultadoTiro r, int idNavio, String coordsNavio, boolean fimDeJogo) {
+        if (fase != Fase.BATALHA) return;
+        Tabuleiro alvo = tabuleiros[1 - atirador];
+        alvo.registrarTiroRemoto(l, c, r, idNavio, coordsNavio);
+        tiros[atirador]++;
+        if (r != Tabuleiro.ResultadoTiro.AGUA) acertos[atirador]++;
+        if (fimDeJogo || alvo.todosAfundados()) {
+            fase = Fase.FIM;
+            vencedor = atirador;
+        }
     }
 
     /** Passa a vez depois que o jogador viu o resultado do tiro. */
