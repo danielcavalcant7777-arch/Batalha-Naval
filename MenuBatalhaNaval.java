@@ -5,7 +5,7 @@ import java.text.Normalizer;
 import java.util.Random;
 import javax.swing.*;
 
-public class MenuBatalhaNaval extends JPanel {
+public class MenuBatalhaNaval extends JPanel implements RedeBatalhaNaval.MensagemListener {
 
     // ===== Paleta de cores =====
     private static final Color AZUL_TOPO     = new Color(10, 40, 90);
@@ -34,6 +34,7 @@ public class MenuBatalhaNaval extends JPanel {
     private static final int BOTAO_LARGURA = 380;
     private static final int BOTAO_ALTURA = 56;
     private static final int MAX_NOME = 12;
+    private static final int PORTA_REDE = 12345;
 
     // ===== Configuracao por dificuldade =====
     private static final int TAM_FACIL = 6;
@@ -41,7 +42,10 @@ public class MenuBatalhaNaval extends JPanel {
     private static final int[] FROTA_FACIL   = {3, 2, 1, 1};
     private static final int[] FROTA_DIFICIL = {4, 3, 2, 2, 1};
 
-    private enum Tela { MENU, OPCOES, DIFICULDADE, NOMES, POSICIONAR, TRANSICAO, BATALHA, FIM }
+    private enum Tela {
+        MENU, OPCOES, MODO_JOGO, DIFICULDADE, NOMES,
+        HOST_ESPERA, CLIENTE_CONECTAR, POSICIONAR, TRANSICAO, BATALHA, FIM
+    }
 
     private final JFrame janela;
     private final Random random = new Random();
@@ -52,6 +56,22 @@ public class MenuBatalhaNaval extends JPanel {
 
     private String dificuldade = "FACIL";
     private final String[] nomes = {"", ""};
+
+    // ===== Modos de Jogo =====
+    private boolean modoIA = false;
+    private IaBatalhaNaval ia;
+    private Timer timerIA;
+
+    // ===== Estado Multiplayer Rede =====
+    private RedeBatalhaNaval rede;
+    private boolean modoRede = false;
+    private boolean souHost = false;
+    private int meuIndice = 0;
+    private String ipDigitado = "";
+    private String statusRede = "";
+    private boolean euPronto = false;
+    private boolean oponentePronto = false;
+    private boolean aguardandoRespostaTiro = false;
 
     // Estado da partida
     private Jogo jogo;
@@ -66,7 +86,7 @@ public class MenuBatalhaNaval extends JPanel {
     private String textoTransicao = "";
     private Runnable aposTransicao;
 
-    // Area do tabuleiro clicavel (atualizada a cada desenho)
+    // Area do tabuleiro clicavel
     private boolean tabAtivo = false;
     private int tabX, tabY, tabCel, tabN;
 
@@ -87,7 +107,7 @@ public class MenuBatalhaNaval extends JPanel {
                 }
                 int sobre = botaoEm(e.getX(), e.getY());
                 if (telaDeTabuleiro()) {
-                    selecionado = sobre;          // sem botao "preso" selecionado
+                    selecionado = sobre;
                 } else if (sobre >= 0) {
                     selecionado = sobre;
                 }
@@ -95,12 +115,11 @@ public class MenuBatalhaNaval extends JPanel {
             }
         });
 
-        // mousePressed em vez de mouseClicked: o clique nao se perde se o mouse tremer
         addMouseListener(new MouseAdapter() {
             @Override
             public void mousePressed(MouseEvent e) {
                 requestFocusInWindow();
-                if (tela == Tela.POSICIONAR && SwingUtilities.isRightMouseButton(e)) {
+                if (tela == Tela.POSICIONAR && !euPronto && SwingUtilities.isRightMouseButton(e)) {
                     horizontal = !horizontal;
                     repaint();
                     return;
@@ -115,7 +134,7 @@ public class MenuBatalhaNaval extends JPanel {
                 }
                 int i = botaoEm(e.getX(), e.getY());
                 if (i >= 0) {
-                    if (tela == Tela.NOMES && botoes[i].campo) {
+                    if ((tela == Tela.NOMES || tela == Tela.CLIENTE_CONECTAR) && botoes[i].campo) {
                         selecionado = i;
                     } else {
                         acionar(botoes[i].indice);
@@ -138,27 +157,48 @@ public class MenuBatalhaNaval extends JPanel {
 
             @Override
             public void keyTyped(KeyEvent e) {
-                if (tela != Tela.NOMES || selecionado < 0 || selecionado > 1) return;
-                int i = selecionado;
-                char c = e.getKeyChar();
-
-                if (c == '\b') {
-                    if (!nomes[i].isEmpty()) {
-                        nomes[i] = nomes[i].substring(0, nomes[i].length() - 1);
-                    }
-                } else {
-                    String limpo = normalizar(String.valueOf(c)).toUpperCase();
-                    for (char ch : limpo.toCharArray()) {
-                        boolean valido = (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == ' ';
-                        if (ch == ' ' && nomes[i].isEmpty()) valido = false; // sem espaco no inicio
-                        if (valido && nomes[i].length() < MAX_NOME) {
-                            nomes[i] += ch;
-                        }
+                if (tela == Tela.NOMES) {
+                    int maxCampos = (modoRede || modoIA) ? 0 : 1;
+                    if (selecionado < 0 || selecionado > maxCampos) return;
+                    int idxNome = modoRede ? meuIndice : selecionado;
+                    editarTexto(e.getKeyChar(), idxNome);
+                } else if (tela == Tela.CLIENTE_CONECTAR) {
+                    if (selecionado == 0) {
+                        editarTexto(e.getKeyChar(), 1);
+                    } else if (selecionado == 1) {
+                        editarIp(e.getKeyChar());
                     }
                 }
                 repaint();
             }
         });
+    }
+
+    private void editarTexto(char c, int idxNome) {
+        if (c == '\b') {
+            if (!nomes[idxNome].isEmpty()) {
+                nomes[idxNome] = nomes[idxNome].substring(0, nomes[idxNome].length() - 1);
+            }
+        } else {
+            String limpo = normalizar(String.valueOf(c)).toUpperCase();
+            for (char ch : limpo.toCharArray()) {
+                boolean valido = (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == ' ';
+                if (ch == ' ' && nomes[idxNome].isEmpty()) valido = false;
+                if (valido && nomes[idxNome].length() < MAX_NOME) {
+                    nomes[idxNome] += ch;
+                }
+            }
+        }
+    }
+
+    private void editarIp(char c) {
+        if (c == '\b') {
+            if (!ipDigitado.isEmpty()) {
+                ipDigitado = ipDigitado.substring(0, ipDigitado.length() - 1);
+            }
+        } else if (((c >= '0' && c <= '9') || c == '.') && ipDigitado.length() < 15) {
+            ipDigitado += c;
+        }
     }
 
     private boolean telaDeTabuleiro() {
@@ -185,6 +225,7 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     private void teclaPosicionar(KeyEvent e) {
+        if (euPronto) return;
         int n = jogo.tabuleiro(jogadorPosicionando).tamanho();
         switch (e.getKeyCode()) {
             case KeyEvent.VK_UP:    cursorL = Math.max(0, cursorL - 1); break;
@@ -206,9 +247,9 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     private void teclaBatalha(KeyEvent e) {
-        int n = jogo.alvoDaVez().tamanho();
+        int n = jogo.tabuleiro(1 - meuIndice).tamanho();
         int k = e.getKeyCode();
-        if (aguardandoContinuar) {
+        if (aguardandoContinuar && !modoRede && !modoIA) {
             if (k == KeyEvent.VK_ENTER || k == KeyEvent.VK_SPACE) continuar();
             return;
         }
@@ -223,7 +264,25 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     // ===== Troca de telas =====
+    private void encerrarModosAtivos() {
+        if (timerIA != null) {
+            timerIA.stop();
+            timerIA = null;
+        }
+        if (rede != null) {
+            rede.fechar();
+            rede = null;
+        }
+        modoIA = false;
+        modoRede = false;
+        souHost = false;
+        euPronto = false;
+        oponentePronto = false;
+        aguardandoRespostaTiro = false;
+    }
+
     private void montarMenu() {
+        encerrarModosAtivos();
         tela = Tela.MENU;
         selecionado = 0;
         botoes = new Botao[] {
@@ -242,6 +301,19 @@ public class MenuBatalhaNaval extends JPanel {
         };
     }
 
+    private void montarModoJogo() {
+        encerrarModosAtivos();
+        tela = Tela.MODO_JOGO;
+        selecionado = 0;
+        botoes = new Botao[] {
+            new Botao("CONTRA IA",        0),
+            new Botao("MESMO PC",         1),
+            new Botao("CRIAR SALA (LAN)", 2),
+            new Botao("ENTRAR NA SALA",   3),
+            new Botao("VOLTAR",           4)
+        };
+    }
+
     private void montarDificuldade() {
         tela = Tela.DIFICULDADE;
         selecionado = 0;
@@ -255,10 +327,47 @@ public class MenuBatalhaNaval extends JPanel {
     private void montarNomes() {
         tela = Tela.NOMES;
         selecionado = 0;
+        if (modoRede) {
+            botoes = new Botao[] {
+                new Botao("", 0, true),
+                new Botao("CRIAR SALA", 2),
+                new Botao("VOLTAR", 3)
+            };
+        } else if (modoIA) {
+            botoes = new Botao[] {
+                new Botao("", 0, true),
+                new Botao("CONFIRMAR", 2),
+                new Botao("VOLTAR", 3)
+            };
+        } else {
+            botoes = new Botao[] {
+                new Botao("", 0, true),
+                new Botao("", 1, true),
+                new Botao("CONFIRMAR", 2),
+                new Botao("VOLTAR", 3)
+            };
+        }
+    }
+
+    private void montarHostEspera() {
+        tela = Tela.HOST_ESPERA;
+        statusRede = "AGUARDANDO AMIGO CONECTAR...";
+        selecionado = 0;
+        botoes = new Botao[] {
+            new Botao("CANCELAR", 0)
+        };
+        rede = new RedeBatalhaNaval(this);
+        rede.iniciarServidor(PORTA_REDE);
+    }
+
+    private void montarClienteConectar() {
+        tela = Tela.CLIENTE_CONECTAR;
+        statusRede = "";
+        selecionado = 0;
         botoes = new Botao[] {
             new Botao("", 0, true),
             new Botao("", 1, true),
-            new Botao("CONFIRMAR", 2),
+            new Botao("CONECTAR", 2),
             new Botao("VOLTAR", 3)
         };
     }
@@ -271,6 +380,7 @@ public class MenuBatalhaNaval extends JPanel {
         cursorL = 0;
         cursorC = 0;
         aviso = "";
+        euPronto = false;
         botoes = new Botao[] {
             new Botao("ALEATORIO", 0),
             new Botao("CONFIRMAR", 1),
@@ -290,6 +400,7 @@ public class MenuBatalhaNaval extends JPanel {
     private void montarBatalha() {
         tela = Tela.BATALHA;
         aguardandoContinuar = false;
+        aguardandoRespostaTiro = false;
         ultimoResultado = null;
         aviso = "";
         cursorL = 0;
@@ -299,22 +410,41 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     private void montarFim() {
+        if (timerIA != null) timerIA.stop();
         tela = Tela.FIM;
-        botoes = new Botao[] {
-            new Botao("JOGAR NOVAMENTE", 0),
-            new Botao("MENU", 1)
-        };
+        if (modoRede) {
+            botoes = new Botao[] {
+                new Botao("REVANCHE", 0),
+                new Botao("MENU", 1)
+            };
+        } else {
+            botoes = new Botao[] {
+                new Botao("JOGAR NOVAMENTE", 0),
+                new Botao("MENU", 1)
+            };
+        }
         selecionado = 0;
     }
 
     private void voltarTela() {
         switch (tela) {
             case OPCOES:      montarMenu(); break;
-            case DIFICULDADE: montarMenu(); break;
+            case MODO_JOGO:   montarMenu(); break;
+            case DIFICULDADE: montarModoJogo(); break;
             case NOMES:       montarDificuldade(); break;
+            case HOST_ESPERA:
+            case CLIENTE_CONECTAR:
+                encerrarModosAtivos();
+                montarModoJogo();
+                break;
             case POSICIONAR:
-                if (jogadorPosicionando == 0) montarNomes();
-                else montarPosicionar(0);
+                if (modoRede) {
+                    montarMenu();
+                } else if (modoIA || jogadorPosicionando == 0) {
+                    montarNomes();
+                } else {
+                    montarPosicionar(0);
+                }
                 break;
             default: break;
         }
@@ -328,7 +458,7 @@ public class MenuBatalhaNaval extends JPanel {
         switch (tela) {
             case MENU:
                 switch (indice) {
-                    case 0: montarDificuldade(); break;
+                    case 0: montarModoJogo(); break;
                     case 1: montarOpcoes(); break;
                     case 2: System.exit(0); break;
                 }
@@ -341,24 +471,81 @@ public class MenuBatalhaNaval extends JPanel {
                 }
                 break;
 
+            case MODO_JOGO:
+                switch (indice) {
+                    case 0:
+                        modoIA = true;
+                        meuIndice = 0;
+                        montarDificuldade();
+                        break;
+                    case 1:
+                        meuIndice = 0;
+                        montarDificuldade();
+                        break;
+                    case 2:
+                        modoRede = true;
+                        souHost = true;
+                        meuIndice = 0;
+                        montarDificuldade();
+                        break;
+                    case 3:
+                        modoRede = true;
+                        souHost = false;
+                        meuIndice = 1;
+                        montarClienteConectar();
+                        break;
+                    case 4:
+                        montarMenu();
+                        break;
+                }
+                break;
+
             case DIFICULDADE:
                 switch (indice) {
                     case 0: dificuldade = "FACIL";   montarNomes(); break;
                     case 1: dificuldade = "DIFICIL"; montarNomes(); break;
-                    case 2: montarMenu(); break;
+                    case 2: montarModoJogo(); break;
                 }
                 break;
 
             case NOMES:
+                if (modoRede) {
+                    switch (indice) {
+                        case 0: selecionado = 1; break;
+                        case 2: montarHostEspera(); break;
+                        case 3: montarDificuldade(); break;
+                    }
+                } else if (modoIA) {
+                    switch (indice) {
+                        case 0: selecionado = 1; break;
+                        case 2: iniciarPartidaIA(); break;
+                        case 3: montarDificuldade(); break;
+                    }
+                } else {
+                    switch (indice) {
+                        case 0: selecionado = 1; break;
+                        case 1: selecionado = 2; break;
+                        case 2: iniciarPartidaLocal(); break;
+                        case 3: montarDificuldade(); break;
+                    }
+                }
+                break;
+
+            case HOST_ESPERA:
+                voltarTela();
+                break;
+
+            case CLIENTE_CONECTAR:
                 switch (indice) {
                     case 0: selecionado = 1; break;
                     case 1: selecionado = 2; break;
-                    case 2: iniciarPartida(); break;
-                    case 3: montarDificuldade(); break;
+                    case 2: conectarAoHost(); break;
+                    case 3: voltarTela(); break;
                 }
                 break;
 
             case POSICIONAR:
+                if (euPronto && indice != 2) return;
                 switch (indice) {
                     case 0: posicionarAleatorio(); break;
                     case 1: confirmarPosicionamento(); break;
@@ -371,15 +558,133 @@ public class MenuBatalhaNaval extends JPanel {
                 break;
 
             case BATALHA:
-                if (indice == 0 && aguardandoContinuar) continuar();
+                if (indice == 0 && aguardandoContinuar && !modoRede && !modoIA) continuar();
                 break;
 
             case FIM:
                 switch (indice) {
-                    case 0: iniciarPartida(); break;
-                    case 1: montarMenu(); break;
+                    case 0:
+                        if (modoRede) {
+                            reiniciarPartidaRede();
+                            rede.enviarMensagem("REINICIAR");
+                        } else if (modoIA) {
+                            iniciarPartidaIA();
+                        } else {
+                            iniciarPartidaLocal();
+                        }
+                        break;
+                    case 1:
+                        montarMenu();
+                        break;
                 }
                 break;
+        }
+        repaint();
+    }
+
+    // ===== Fluxo Rede =====
+    private void conectarAoHost() {
+        String ip = ipDigitado.trim();
+        if (ip.isEmpty()) {
+            statusRede = "DIGITE O IP DO HOST!";
+            return;
+        }
+        statusRede = "CONECTANDO EM " + ip + "...";
+        if (rede != null) rede.fechar();
+        rede = new RedeBatalhaNaval(this);
+        rede.conectarCliente(ip, PORTA_REDE);
+    }
+
+    @Override
+    public void onConexaoEstabelecida() {
+        if (souHost) {
+            rede.enviarMensagem("CONFIG:" + dificuldade + ":" + nomeOuPadrao(0));
+        } else {
+            rede.enviarMensagem("OLA:" + nomeOuPadrao(1));
+            statusRede = "CONECTADO! AGUARDANDO HOST...";
+        }
+        repaint();
+    }
+
+    @Override
+    public void onMensagemRecebida(String msg) {
+        if (msg.startsWith("CONFIG:")) {
+            String[] p = msg.split(":", 3);
+            dificuldade = p[1];
+            nomes[0] = p[2];
+            iniciarPartidaRede();
+        }
+        else if (msg.startsWith("OLA:")) {
+            nomes[1] = msg.split(":", 2)[1];
+            iniciarPartidaRede();
+        }
+        else if (msg.equals("PRONTO")) {
+            oponentePronto = true;
+            if (euPronto) {
+                jogo.iniciarBatalhaRede();
+                montarBatalha();
+            } else {
+                aviso = "OPONENTE JA POSICIONOU!";
+            }
+        }
+        else if (msg.startsWith("TIRO:")) {
+            String[] lc = msg.split(":")[1].split(",");
+            int l = Integer.parseInt(lc[0]);
+            int c = Integer.parseInt(lc[1]);
+
+            Tabuleiro meuTab = jogo.tabuleiro(meuIndice);
+            int idNavio = meuTab.navioEm(l, c);
+            Tabuleiro.ResultadoTiro r = meuTab.atirar(l, c);
+            String coordsAfundado = (r == Tabuleiro.ResultadoTiro.AFUNDOU) ? meuTab.celulasDoNavio(idNavio) : "";
+            boolean fim = meuTab.todosAfundados();
+
+            jogo.registrarTiroRede(1 - meuIndice, l, c, r, idNavio, coordsAfundado, fim);
+            rede.enviarMensagem("RES:" + l + "," + c + "," + r.name() + "," + idNavio + "," + fim + "," + coordsAfundado);
+
+            if (fim) {
+                montarFim();
+            } else {
+                jogo.passarVez();
+                aviso = r == Tabuleiro.ResultadoTiro.AGUA ? "OPONENTE ERROU! SUA VEZ" : "OPONENTE ACERTOU! SUA VEZ";
+            }
+        }
+        else if (msg.startsWith("RES:")) {
+            String[] p = msg.substring(4).split(",", 6);
+            int l = Integer.parseInt(p[0]);
+            int c = Integer.parseInt(p[1]);
+            Tabuleiro.ResultadoTiro r = Tabuleiro.ResultadoTiro.valueOf(p[2]);
+            int idNavio = Integer.parseInt(p[3]);
+            boolean fim = Boolean.parseBoolean(p[4]);
+            String coordsAfundado = p.length > 5 ? p[5] : "";
+
+            jogo.registrarTiroRede(meuIndice, l, c, r, idNavio, coordsAfundado, fim);
+            aguardandoRespostaTiro = false;
+
+            if (fim) {
+                montarFim();
+            } else {
+                jogo.passarVez();
+                switch (r) {
+                    case AGUA:    aviso = "AGUA! VEZ DO OPONENTE"; break;
+                    case ACERTO:  aviso = "ACERTOU! VEZ DO OPONENTE"; break;
+                    case AFUNDOU: aviso = "AFUNDOU UM NAVIO! VEZ DO OPONENTE"; break;
+                    default: break;
+                }
+            }
+        }
+        else if (msg.equals("REINICIAR")) {
+            reiniciarPartidaRede();
+        }
+        repaint();
+    }
+
+    @Override
+    public void onErro(String erro) {
+        if (tela == Tela.CLIENTE_CONECTAR || tela == Tela.HOST_ESPERA) {
+            statusRede = "FALHA NA CONEXAO!";
+        } else {
+            JOptionPane.showMessageDialog(this, erro, "Conexao Encerrada", JOptionPane.WARNING_MESSAGE);
+            montarMenu();
         }
         repaint();
     }
@@ -390,12 +695,37 @@ public class MenuBatalhaNaval extends JPanel {
         return n.isEmpty() ? "JOGADOR " + (i + 1) : n;
     }
 
-    private void iniciarPartida() {
+    private void iniciarPartidaIA() {
+        boolean facil = dificuldade.equals("FACIL");
+        ia = new IaBatalhaNaval(!facil); // No Dificil a IA persegue navios atingidos
+        jogo = new Jogo(nomeOuPadrao(0), "CPU IA",
+                        facil ? TAM_FACIL : TAM_DIFICIL,
+                        facil ? FROTA_FACIL : FROTA_DIFICIL);
+        jogo.tabuleiro(1).posicionarAleatorio(random);
+        montarPosicionar(0);
+    }
+
+    private void iniciarPartidaLocal() {
         boolean facil = dificuldade.equals("FACIL");
         jogo = new Jogo(nomeOuPadrao(0), nomeOuPadrao(1),
                         facil ? TAM_FACIL : TAM_DIFICIL,
                         facil ? FROTA_FACIL : FROTA_DIFICIL);
         montarPosicionar(0);
+    }
+
+    private void iniciarPartidaRede() {
+        boolean facil = dificuldade.equals("FACIL");
+        euPronto = false;
+        oponentePronto = false;
+        jogo = new Jogo(nomeOuPadrao(0), nomeOuPadrao(1),
+                        facil ? TAM_FACIL : TAM_DIFICIL,
+                        facil ? FROTA_FACIL : FROTA_DIFICIL);
+        montarPosicionar(meuIndice);
+    }
+
+    private void reiniciarPartidaRede() {
+        iniciarPartidaRede();
+        repaint();
     }
 
     private void acaoNaCelula(int l, int c) {
@@ -404,9 +734,10 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     private void cliqueNaCelula(int l, int c) {
+        if (euPronto) return;
         Tabuleiro t = jogo.tabuleiro(jogadorPosicionando);
         int id = t.navioEm(l, c);
-        if (id >= 0) {               // clicou num navio: remove
+        if (id >= 0) {
             t.remover(id);
             aviso = "";
             return;
@@ -420,6 +751,7 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     private void posicionarAleatorio() {
+        if (euPronto) return;
         jogo.tabuleiro(jogadorPosicionando).posicionarAleatorio(random);
         aviso = "";
     }
@@ -429,15 +761,68 @@ public class MenuBatalhaNaval extends JPanel {
             aviso = "COLOQUE TODOS OS NAVIOS!";
             return;
         }
-        if (jogadorPosicionando == 0) {
-            mostrarTransicao(jogo.nome(1), () -> montarPosicionar(1));
-        } else {
+        if (modoRede) {
+            euPronto = true;
+            rede.enviarMensagem("PRONTO");
+            if (oponentePronto) {
+                jogo.iniciarBatalhaRede();
+                montarBatalha();
+            } else {
+                aviso = "AGUARDANDO OPONENTE...";
+            }
+        } else if (modoIA) {
             jogo.iniciarBatalha();
-            mostrarTransicao(jogo.nome(0), this::montarBatalha);
+            montarBatalha();
+        } else {
+            if (jogadorPosicionando == 0) {
+                mostrarTransicao(jogo.nome(1), () -> montarPosicionar(1));
+            } else {
+                jogo.iniciarBatalha();
+                mostrarTransicao(jogo.nome(0), this::montarBatalha);
+            }
         }
     }
 
     private void atirar(int l, int c) {
+        if (modoRede) {
+            if (jogo.vez() != meuIndice || aguardandoRespostaTiro) return;
+            Tabuleiro alvo = jogo.tabuleiro(1 - meuIndice);
+            if (!alvo.dentro(l, c)) return;
+            if (alvo.foiAtingida(l, c)) {
+                aviso = "VOCE JA ATIROU AI!";
+                return;
+            }
+            aguardandoRespostaTiro = true;
+            aviso = "DISPARANDO...";
+            rede.enviarMensagem("TIRO:" + l + "," + c);
+            return;
+        }
+
+        if (modoIA) {
+            if (jogo.vez() != 0 || aguardandoRespostaTiro) return;
+            Tabuleiro.ResultadoTiro r = jogo.atirar(l, c);
+            switch (r) {
+                case REPETIDO: aviso = "VOCE JA ATIROU AI!"; return;
+                case INVALIDO: return;
+                case AGUA:     aviso = "AGUA! VEZ DA IA"; break;
+                case ACERTO:   aviso = "ACERTOU! VEZ DA IA"; break;
+                case AFUNDOU:  aviso = "AFUNDOU UM NAVIO! VEZ DA IA"; break;
+            }
+            if (jogo.fase() == Jogo.Fase.FIM) {
+                montarFim();
+                return;
+            }
+            jogo.passarVez();
+            aguardandoRespostaTiro = true;
+
+            // Pequeno atraso para o jogador ver seu tiro antes da IA responder
+            timerIA = new Timer(700, e -> executarTurnoIA());
+            timerIA.setRepeats(false);
+            timerIA.start();
+            return;
+        }
+
+        // Modo local (mesmo PC)
         if (aguardandoContinuar) return;
         Tabuleiro.ResultadoTiro r = jogo.atirar(l, c);
         switch (r) {
@@ -453,6 +838,27 @@ public class MenuBatalhaNaval extends JPanel {
         selecionado = 0;
     }
 
+    private void executarTurnoIA() {
+        if (tela != Tela.BATALHA || jogo.fase() != Jogo.Fase.BATALHA) return;
+        int[] coord = ia.escolherTiro(jogo.tabuleiro(0));
+        Tabuleiro.ResultadoTiro r = jogo.atirar(coord[0], coord[1]);
+        ia.registrarResultado(coord[0], coord[1], r);
+        aguardandoRespostaTiro = false;
+
+        if (jogo.fase() == Jogo.Fase.FIM) {
+            montarFim();
+        } else {
+            jogo.passarVez();
+            switch (r) {
+                case AGUA:    aviso = "IA ERROU! SUA VEZ"; break;
+                case ACERTO:  aviso = "IA ACERTOU SEU NAVIO! SUA VEZ"; break;
+                case AFUNDOU: aviso = "IA AFUNDOU SEU NAVIO! SUA VEZ"; break;
+                default: break;
+            }
+        }
+        repaint();
+    }
+
     private void continuar() {
         if (jogo.fase() == Jogo.Fase.FIM) {
             montarFim();
@@ -463,7 +869,6 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     private static String normalizar(String s) {
-        // Remove acentos: "Joao" com til vira "Joao"
         return Normalizer.normalize(s, Normalizer.Form.NFD).replaceAll("\\p{M}", "");
     }
 
@@ -531,10 +936,15 @@ public class MenuBatalhaNaval extends JPanel {
     private void desenharTelaMenu(Graphics2D g2, int w, int h) {
         desenharTituloCentral(g2, titulo(), 60, 8, w);
 
-        int espaco = (tela == Tela.NOMES) ? 16 : 22;
+        int espaco = (tela == Tela.NOMES || tela == Tela.CLIENTE_CONECTAR || tela == Tela.MODO_JOGO) ? 14 : 22;
         int yInicial;
 
-        if (tela == Tela.TRANSICAO) {
+        if (tela == Tela.HOST_ESPERA) {
+            desenharTextoCentral(g2, "SEU IP LOCAL:", 170, 3, w, TEXTO_BOTAO);
+            desenharTituloCentral(g2, RedeBatalhaNaval.getIpLocal(), 210, 5, w);
+            desenharTextoCentral(g2, statusRede, 275, 2, w, AVISO);
+            yInicial = 330;
+        } else if (tela == Tela.TRANSICAO) {
             desenharTituloCentral(g2, textoTransicao, 170, 6, w);
             desenharTextoCentral(g2, "O OUTRO JOGADOR NAO PODE OLHAR!", 250, 2, w, TEXTO_BOTAO);
             yInicial = 300;
@@ -548,7 +958,7 @@ public class MenuBatalhaNaval extends JPanel {
             yInicial = 310;
         } else {
             int total = botoes.length * BOTAO_ALTURA + (botoes.length - 1) * espaco;
-            yInicial = Math.max(170, (h - total) / 2 + 50);
+            yInicial = Math.max(150, (h - total) / 2 + 45);
         }
 
         int x = (w - BOTAO_LARGURA) / 2;
@@ -559,6 +969,11 @@ public class MenuBatalhaNaval extends JPanel {
             b.largura = BOTAO_LARGURA;
             b.altura = BOTAO_ALTURA;
             desenharBotao(g2, b, i == selecionado, true);
+        }
+
+        if (tela == Tela.CLIENTE_CONECTAR && !statusRede.isEmpty()) {
+            Botao ultimo = botoes[botoes.length - 1];
+            desenharTextoCentral(g2, statusRede, ultimo.y + ultimo.altura + 20, 2, w, AVISO);
         }
 
         if (tela == Tela.DIFICULDADE && selecionado >= 0 && selecionado <= 1) {
@@ -578,11 +993,16 @@ public class MenuBatalhaNaval extends JPanel {
         desenharTextoCentral(g2, jogo.nome(jogadorPosicionando), 62, 3, w, CINZA_METAL_1);
 
         int proximo = t.proximoNaoColocado();
-        String info = proximo < 0
-            ? "PRONTO! APERTE C OU CONFIRMAR"
-            : "NAVIO " + (proximo + 1) + " DE " + t.quantidadeNavios()
+        String info;
+        if (euPronto) {
+            info = "FROTA CONFIRMADA!";
+        } else if (proximo < 0) {
+            info = "PRONTO! APERTE C OU CONFIRMAR";
+        } else {
+            info = "NAVIO " + (proximo + 1) + " DE " + t.quantidadeNavios()
               + " - TAMANHO " + t.tamanhoNavio(proximo)
               + " - " + (horizontal ? "HORIZONTAL" : "VERTICAL");
+        }
         desenharTextoCentral(g2, info, 96, 2, w, TEXTO_BOTAO);
 
         int cel = Math.max(20, Math.min(48, (h - 270) / n));
@@ -591,8 +1011,7 @@ public class MenuBatalhaNaval extends JPanel {
 
         desenharTabuleiro(g2, t, ox, oy, cel, true);
 
-        // Previa do proximo navio sob o cursor
-        if (proximo >= 0 && t.navioEm(cursorL, cursorC) < 0) {
+        if (!euPronto && proximo >= 0 && t.navioEm(cursorL, cursorC) < 0) {
             boolean cabe = t.cabe(proximo, cursorL, cursorC, horizontal);
             g2.setColor(cabe ? PREVIA_OK : PREVIA_RUIM);
             for (int k = 0; k < t.tamanhoNavio(proximo); k++) {
@@ -603,8 +1022,10 @@ public class MenuBatalhaNaval extends JPanel {
                 }
             }
         }
-        desenharCursor(g2, ox, oy, cel);
-        registrarTabuleiro(ox, oy, cel, n);
+        if (!euPronto) {
+            desenharCursor(g2, ox, oy, cel);
+            registrarTabuleiro(ox, oy, cel, n);
+        }
 
         String rodape = aviso.isEmpty() ? "R GIRA   A ALEATORIO   C CONFIRMA   ESC VOLTA" : aviso;
         desenharTextoCentral(g2, rodape, oy + lado + 14, 2, w, aviso.isEmpty() ? TEXTO_BOTAO : AVISO);
@@ -613,12 +1034,15 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     private void desenharBatalha(Graphics2D g2, int w, int h) {
-        int eu = jogo.vez();
+        int eu = (modoRede || modoIA) ? meuIndice : jogo.vez();
         Tabuleiro meu = jogo.tabuleiro(eu);
-        Tabuleiro alvo = jogo.alvoDaVez();
+        Tabuleiro alvo = jogo.tabuleiro(1 - eu);
         int n = alvo.tamanho();
 
-        desenharTituloCentral(g2, "VEZ DE " + jogo.nome(eu), 16, 4, w);
+        String tituloBatalha = (modoRede || modoIA)
+            ? (jogo.vez() == meuIndice ? "SUA VEZ DE ATACAR" : "VEZ DE " + jogo.nome(1 - meuIndice))
+            : "VEZ DE " + jogo.nome(eu);
+        desenharTituloCentral(g2, tituloBatalha, 16, 4, w);
 
         int cel = Math.max(16, Math.min(44, Math.min((w - 140) / (2 * n), (h - 280) / n)));
         int lado = n * cel, gap = 80;
@@ -629,20 +1053,29 @@ public class MenuBatalhaNaval extends JPanel {
 
         desenharTabuleiro(g2, meu, ox1, oy, cel, true);
         desenharTabuleiro(g2, alvo, ox2, oy, cel, false);
-        desenharCursor(g2, ox2, oy, cel);
-        if (!aguardandoContinuar) registrarTabuleiro(ox2, oy, cel, n);
+
+        boolean podeAtirar = (modoRede || modoIA)
+            ? (jogo.vez() == meuIndice && !aguardandoRespostaTiro)
+            : !aguardandoContinuar;
+        if (podeAtirar) {
+            desenharCursor(g2, ox2, oy, cel);
+            registrarTabuleiro(ox2, oy, cel, n);
+        }
 
         desenharTextoCentralEm(g2, "RESTAM " + meu.naviosRestantes(), ox1 + lado / 2, oy + lado + 12, 2, TEXTO_BOTAO);
         desenharTextoCentralEm(g2, "RESTAM " + alvo.naviosRestantes(), ox2 + lado / 2, oy + lado + 12, 2, TEXTO_BOTAO);
 
         String msg;
         Color cor;
-        if (aguardandoContinuar) {
+        if (aguardandoContinuar && !modoRede && !modoIA) {
             msg = aviso;
             cor = ultimoResultado == Tabuleiro.ResultadoTiro.AGUA ? ERRO : AVISO;
         } else if (!aviso.isEmpty()) {
             msg = aviso;
             cor = AVISO;
+        } else if ((modoRede || modoIA) && jogo.vez() != meuIndice) {
+            msg = modoIA ? "IA PENSANDO..." : "AGUARDE O TIRO DO OPONENTE...";
+            cor = CINZA_METAL_1;
         } else {
             msg = "ESCOLHA UM ALVO";
             cor = TEXTO_BOTAO;
@@ -650,7 +1083,7 @@ public class MenuBatalhaNaval extends JPanel {
         int yMsg = oy + lado + 40;
         desenharTextoCentral(g2, msg, yMsg, 3, w, cor);
 
-        if (aguardandoContinuar) {
+        if (aguardandoContinuar && !modoRede && !modoIA) {
             desenharBotoesLinha(g2, w, yMsg + 36, 240, 44, 20);
         }
     }
@@ -663,7 +1096,6 @@ public class MenuBatalhaNaval extends JPanel {
         tabN = n;
     }
 
-    /** revelar = mostra os navios (seu proprio mar). No mar inimigo so aparecem os afundados. */
     private void desenharTabuleiro(Graphics2D g2, Tabuleiro t, int ox, int oy, int cel, boolean revelar) {
         int n = t.tamanho();
         int lado = n * cel;
@@ -671,7 +1103,6 @@ public class MenuBatalhaNaval extends JPanel {
         g2.setColor(CONTORNO);
         g2.fillRect(ox - 4, oy - 4, lado + 8, lado + 8);
 
-        // Coordenadas: letras nas colunas, numeros nas linhas
         for (int c = 0; c < n; c++) {
             desenharPixelsTexto(g2, String.valueOf((char) ('A' + c)), ox + c * cel + (cel - 10) / 2, oy - 22, 2, CINZA_METAL_1);
         }
@@ -706,7 +1137,6 @@ public class MenuBatalhaNaval extends JPanel {
         g2.drawRect(x + 2, y + 2, cel - 5, cel - 5);
     }
 
-    /** Desenha um pedaco do navio emendando com os vizinhos do mesmo navio. */
     private void desenharParteNavio(Graphics2D g2, Tabuleiro t, int l, int c, int x, int y, int cel) {
         int id = t.navioEm(l, c);
         int m = Math.max(3, cel / 8);
@@ -746,12 +1176,15 @@ public class MenuBatalhaNaval extends JPanel {
 
     private String titulo() {
         switch (tela) {
-            case OPCOES:      return "OPCOES";
-            case DIFICULDADE: return "DIFICULDADE";
-            case NOMES:       return "JOGADORES";
-            case TRANSICAO:   return "PASSE PARA";
-            case FIM:         return "FIM DE JOGO";
-            default:          return "BATALHA NAVAL";
+            case OPCOES:           return "OPCOES";
+            case MODO_JOGO:        return "MODO DE JOGO";
+            case DIFICULDADE:      return "DIFICULDADE";
+            case NOMES:            return (modoRede || modoIA) ? "SEU NOME" : "JOGADORES";
+            case HOST_ESPERA:      return "SALA CRIADA";
+            case CLIENTE_CONECTAR: return "ENTRAR NA SALA";
+            case TRANSICAO:        return "PASSE PARA";
+            case FIM:              return "FIM DE JOGO";
+            default:               return "BATALHA NAVAL";
         }
     }
 
@@ -823,7 +1256,6 @@ public class MenuBatalhaNaval extends JPanel {
         }
     }
 
-    /** Retangulo com os cantos "comidos" (pixel art), sem pintar por cima do fundo. */
     private void retanguloChanfrado(Graphics2D g2, int x, int y, int w, int h, int p) {
         g2.fillRect(x + p, y, w - 2 * p, h);
         g2.fillRect(x, y + p, w, h - 2 * p);
@@ -862,8 +1294,19 @@ public class MenuBatalhaNaval extends JPanel {
     }
 
     private String textoCampo(int i, boolean ativo) {
-        String n = nomes[i];
-        if (!ativo && n.isEmpty()) return "JOGADOR " + (i + 1);
+        if (tela == Tela.CLIENTE_CONECTAR) {
+            if (i == 0) {
+                String n = nomes[1];
+                if (!ativo && n.isEmpty()) return "SEU NOME";
+                return ativo ? n + "_" : n;
+            } else {
+                if (!ativo && ipDigitado.isEmpty()) return "IP DO HOST";
+                return ativo ? ipDigitado + "_" : ipDigitado;
+            }
+        }
+        int idx = modoRede ? meuIndice : i;
+        String n = nomes[idx];
+        if (!ativo && n.isEmpty()) return (modoRede || modoIA) ? "SEU NOME" : "JOGADOR " + (i + 1);
         return ativo ? n + "_" : n;
     }
 
@@ -954,6 +1397,8 @@ public class MenuBatalhaNaval extends JPanel {
             GLIFOS.put('?', new String[]{" ### ","#   #","    #","   # ","  #  ","     ","  #  "});
             GLIFOS.put('-', new String[]{"     ","     ","     "," ### ","     ","     ","     "});
             GLIFOS.put('.', new String[]{"     ","     ","     ","     ","     ","     ","  #  "});
+            GLIFOS.put('(', new String[]{"   # ","  #  "," #   "," #   "," #   ","  #  ","   # "});
+            GLIFOS.put(')', new String[]{" #   ","  #  ","   # ","   # ","   # ","  #  "," #   "});
             GLIFOS.put('/', new String[]{"    #","    #","   # ","  #  "," #   ","#    ","#    "});
             GLIFOS.put('_', new String[]{"     ","     ","     ","     ","     ","     ","#####"});
             GLIFOS.put(' ', new String[]{"     ","     ","     ","     ","     ","     ","     "});
