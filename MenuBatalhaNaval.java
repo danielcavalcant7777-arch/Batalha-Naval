@@ -1,8 +1,14 @@
 import java.awt.*;
 import java.awt.event.*;
 import java.awt.image.BufferedImage;
+import java.awt.image.RescaleOp;
+import java.io.File;
+import java.io.IOException;
 import java.text.Normalizer;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Random;
+import javax.imageio.ImageIO;
 import javax.swing.*;
 
 public class MenuBatalhaNaval extends JPanel implements RedeBatalhaNaval.MensagemListener {
@@ -41,6 +47,39 @@ public class MenuBatalhaNaval extends JPanel implements RedeBatalhaNaval.Mensage
     private static final int TAM_DIFICIL = 8;
     private static final int[] FROTA_FACIL   = {3, 2, 1, 1};
     private static final int[] FROTA_DIFICIL = {4, 3, 2, 2, 1};
+
+    // ===== Sprites dos navios (pasta assets/, ao lado dos .java) =====
+    private static final String PASTA_SPRITES = "assets";
+    private static final Map<Integer, BufferedImage> SPRITES = new HashMap<>();          // horizontal
+    private static final Map<Integer, BufferedImage> SPRITES_VERTICAIS = new HashMap<>(); // girados
+    static {
+        // Tamanho do navio -> sprite
+        carregarSprite(4, "encouracado.png");
+        carregarSprite(3, "cruzador.png");
+        carregarSprite(2, "contratorpedeiro.png");
+        carregarSprite(1, "submarino.png");
+        for (Map.Entry<Integer, BufferedImage> e : SPRITES.entrySet()) {
+            SPRITES_VERTICAIS.put(e.getKey(), girarHorario(e.getValue()));
+        }
+    }
+
+    private static void carregarSprite(int tamanho, String arquivo) {
+        try {
+            BufferedImage img = ImageIO.read(new File(PASTA_SPRITES, arquivo));
+            if (img != null) SPRITES.put(tamanho, img);
+        } catch (IOException ignorado) {
+            // Sem sprite: o navio continua sendo desenhado com retangulos.
+        }
+    }
+
+    private static BufferedImage girarHorario(BufferedImage img) {
+        int w = img.getWidth(), h = img.getHeight();
+        BufferedImage out = new BufferedImage(h, w, BufferedImage.TYPE_INT_ARGB);
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+                out.setRGB(h - 1 - y, x, img.getRGB(x, y));
+        return out;
+    }
 
     private enum Tela {
         MENU, OPCOES, MODO_JOGO, DIFICULDADE, NOMES,
@@ -1111,23 +1150,82 @@ public class MenuBatalhaNaval extends JPanel implements RedeBatalhaNaval.Mensage
             desenharPixelsTexto(g2, num, ox - 10 - larguraTexto(num, 2), oy + l * cel + (cel - 14) / 2, 2, CINZA_METAL_1);
         }
 
+        // 1. Agua
         for (int l = 0; l < n; l++) {
             for (int c = 0; c < n; c++) {
-                int x = ox + c * cel;
-                int y = oy + l * cel;
                 g2.setColor((l + c) % 2 == 0 ? AGUA : AGUA_CLARA);
-                g2.fillRect(x, y, cel, cel);
+                g2.fillRect(ox + c * cel, oy + l * cel, cel, cel);
+            }
+        }
 
-                int id = t.navioEm(l, c);
-                if (id >= 0 && (revelar || t.afundado(id))) {
-                    desenharParteNavio(g2, t, l, c, x, y, cel);
-                }
-                if (t.foiAtingida(l, c)) {
-                    if (id >= 0) desenharAcerto(g2, x, y, cel);
-                    else desenharErro(g2, x, y, cel);
+        // 2. Navios (sprite inteiro; se faltar sprite, desenha celula por celula)
+        for (int id = 0; id < t.quantidadeNavios(); id++) {
+            if (!t.estaColocado(id)) continue;
+            boolean afundado = t.afundado(id);
+            if (!revelar && !afundado) continue;
+            if (desenharNavioComSprite(g2, t, id, cel, ox, oy, afundado)) continue;
+            for (int l = 0; l < n; l++) {
+                for (int c = 0; c < n; c++) {
+                    if (t.navioEm(l, c) == id) {
+                        desenharParteNavio(g2, t, l, c, ox + c * cel, oy + l * cel, cel);
+                    }
                 }
             }
         }
+
+        // 3. Marcas de tiro (por cima dos navios)
+        for (int l = 0; l < n; l++) {
+            for (int c = 0; c < n; c++) {
+                if (!t.foiAtingida(l, c)) continue;
+                int x = ox + c * cel;
+                int y = oy + l * cel;
+                if (t.navioEm(l, c) >= 0) desenharAcerto(g2, x, y, cel);
+                else desenharErro(g2, x, y, cel);
+            }
+        }
+    }
+
+    /** Desenha o navio com o sprite do seu tamanho. Retorna false se nao houver sprite. */
+    private boolean desenharNavioComSprite(Graphics2D g2, Tabuleiro t, int id, int cel, int ox, int oy, boolean afundado) {
+        int n = t.tamanho();
+        int minL = n, minC = n, maxL = -1, maxC = -1;
+        for (int l = 0; l < n; l++) {
+            for (int c = 0; c < n; c++) {
+                if (t.navioEm(l, c) == id) {
+                    minL = Math.min(minL, l); maxL = Math.max(maxL, l);
+                    minC = Math.min(minC, c); maxC = Math.max(maxC, c);
+                }
+            }
+        }
+        if (maxL < 0) return false;
+
+        boolean vertical = maxL > minL && maxC == minC;
+        int tam = t.tamanhoNavio(id);
+        BufferedImage sprite = (vertical ? SPRITES_VERTICAIS : SPRITES).get(tam);
+        if (sprite == null) return false;
+
+        if (afundado) {
+            sprite = new RescaleOp(new float[]{0.5f, 0.5f, 0.5f, 1f}, new float[]{0f, 0f, 0f, 0f}, null).filter(sprite, null);
+        }
+
+        // Comprimento do navio em pixels (um pouco menor que as celulas, para respirar)
+        double comprimento = tam * cel - 4;
+        double referencia = vertical ? sprite.getHeight() : sprite.getWidth();
+        double escala = comprimento / referencia;
+        int dw = (int) Math.round(sprite.getWidth() * escala);
+        int dh = (int) Math.round(sprite.getHeight() * escala);
+
+        // Centro da area ocupada pelo navio
+        double cx = ox + (minC + maxC + 1) * cel / 2.0;
+        double cy = oy + (minL + maxL + 1) * cel / 2.0;
+
+        Object interpolacao = g2.getRenderingHint(RenderingHints.KEY_INTERPOLATION);
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_NEAREST_NEIGHBOR);
+        g2.drawImage(sprite, (int) Math.round(cx - dw / 2.0), (int) Math.round(cy - dh / 2.0), dw, dh, null);
+        if (interpolacao != null) {
+            g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, interpolacao);
+        }
+        return true;
     }
 
     private void desenharCursor(Graphics2D g2, int ox, int oy, int cel) {
